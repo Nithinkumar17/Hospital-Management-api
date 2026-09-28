@@ -1,8 +1,16 @@
-import { applicationDefault, cert, getApps, initializeApp } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
-import type { Doctor, Patient } from './types.js';
+import {
+  applicationDefault,
+  cert,
+  getApps,
+  initializeApp,
+} from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
+import type { Doctor, Patient } from "./types.js";
 
-export interface Database { patients: Patient[]; doctors: Doctor[] }
+export interface Database {
+  patients: Patient[];
+  doctors: Doctor[];
+}
 
 function getDatabaseDocument() {
   if (getApps().length === 0) {
@@ -18,7 +26,7 @@ function getDatabaseDocument() {
     });
   }
 
-  return getFirestore().collection('hospital').doc('state');
+  return getFirestore().collection("hospital").doc("state");
 }
 
 export async function checkDatabaseConnection(): Promise<void> {
