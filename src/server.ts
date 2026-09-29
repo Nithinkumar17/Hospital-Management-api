@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import { randomUUID } from "node:crypto";
 import cors from "cors";
 import express, {
   type NextFunction,
@@ -10,10 +11,18 @@ import { openapiDocument } from "./openapi.js";
 import {
   checkDatabaseConnection,
   readDatabase,
-  writeDatabase,
+  transactDatabase,
   type Database,
 } from "./store.js";
 import type { Doctor, DoctorInput, Patient, PatientInput } from "./types.js";
+import type { Appointment, AppointmentStatus, DoctorSchedule } from "./types.js";
+import {
+  dayForDate,
+  generateTimeSlots,
+  getAvailableDates,
+  isValidDate,
+  validateSchedule,
+} from "./scheduling.js";
 
 dotenv.config({ path: [".env.local", ".env"] });
 
@@ -53,9 +62,7 @@ async function mutate<T>(
 ): Promise<T> {
   let result!: T;
   const current = writeQueue.then(async () => {
-    const database = await readDatabase();
-    result = await operation(database);
-    await writeDatabase(database);
+    result = await transactDatabase(operation);
   });
   writeQueue = current.catch(() => undefined);
   await current;
@@ -361,6 +368,140 @@ app.delete("/api/doctors/:id", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+const emptySchedule: DoctorSchedule = {
+  availableDays: [], timeFrom: "09:00", timeTo: "17:00", slotDuration: 30,
+};
+const appointmentStatuses: AppointmentStatus[] = ["Booked", "Completed", "Cancelled"];
+const bloodGroups = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
+
+function currentDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function doctorCanBook(database: Database): boolean {
+  return database.doctors.length > 0 && database.doctors[0].availability === "Available";
+}
+
+app.get("/api/doctor-schedule", async (_req, res, next) => {
+  try {
+    const database = await readDatabase();
+    res.json(database.doctorSchedule ?? emptySchedule);
+  } catch (error) { next(error); }
+});
+
+app.put("/api/doctor-schedule", async (req, res, next) => {
+  try {
+    const issues = validateSchedule(req.body);
+    if (issues.length) return fail(res, 400, "Invalid doctor schedule", issues);
+    const schedule = req.body as DoctorSchedule;
+    await mutate((database) => { database.doctorSchedule = schedule; });
+    return res.json({ message: "Schedule updated successfully", schedule });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/appointments/available-dates", async (req, res, next) => {
+  try {
+    const database = await readDatabase();
+    if (!doctorCanBook(database)) return fail(res, 409, "Doctor is currently unavailable for appointments.");
+    const schedule = database.doctorSchedule;
+    if (!schedule || validateSchedule(schedule).length) return res.json([]);
+    const from = typeof req.query.from === "string" ? req.query.from : currentDate();
+    if (!isValidDate(from)) return fail(res, 400, "from must use YYYY-MM-DD");
+    return res.json(getAvailableDates(schedule, from < currentDate() ? currentDate() : from));
+  } catch (error) { next(error); }
+});
+
+app.get("/api/appointments/slots", async (req, res, next) => {
+  try {
+    const date = typeof req.query.date === "string" ? req.query.date : "";
+    if (!isValidDate(date)) return fail(res, 400, "date must use YYYY-MM-DD");
+    if (date < currentDate()) return fail(res, 400, "Past appointment dates are not allowed");
+    const database = await readDatabase();
+    if (!doctorCanBook(database)) return fail(res, 409, "Doctor is currently unavailable for appointments.");
+    const schedule = database.doctorSchedule;
+    if (!schedule || validateSchedule(schedule).length || !schedule.availableDays.includes(dayForDate(date)!)) return res.json([]);
+    const taken = new Set((database.appointments ?? [])
+      .filter((item) => item.appointmentDate === date && item.status !== "Cancelled")
+      .map((item) => item.appointmentTime));
+    return res.json(generateTimeSlots(schedule.timeFrom, schedule.timeTo, schedule.slotDuration)
+      .map((time) => ({ time, booked: taken.has(time) })));
+  } catch (error) { next(error); }
+});
+
+app.get("/api/appointments", async (req, res, next) => {
+  try {
+    const database = await readDatabase();
+    const status = req.query.status;
+    if (status && status !== "All" && !appointmentStatuses.includes(status as AppointmentStatus))
+      return fail(res, 400, "status must be All, Booked, Completed, or Cancelled");
+    const q = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
+    const appointments = (database.appointments ?? []).filter((item) =>
+      (!status || status === "All" || item.status === status) &&
+      (!q || `${item.id} ${item.patientName} ${item.phone}`.toLowerCase().includes(q)))
+      .sort((a, b) => a.appointmentDate.localeCompare(b.appointmentDate) || a.appointmentTime.localeCompare(b.appointmentTime));
+    return res.json(appointments);
+  } catch (error) { next(error); }
+});
+
+app.post("/api/appointments", async (req, res, next) => {
+  try {
+    const body = req.body as Record<string, unknown>;
+    const issues = requiredFields(body, ["patientName", "phone", "email", "bloodGroup", "problem", "appointmentDate", "appointmentTime"]);
+    if (!Number.isInteger(body.age) || Number(body.age) < 1 || Number(body.age) > 120) issues.push("age must be an integer between 1 and 120");
+    if (!validGender(body.gender)) issues.push("gender must be Male, Female, or Other");
+    if (typeof body.email === "string" && !/^\S+@\S+\.\S+$/.test(body.email)) issues.push("email must be valid");
+    if (typeof body.bloodGroup === "string" && !bloodGroups.includes(body.bloodGroup)) issues.push("bloodGroup must be a supported blood group");
+    if (typeof body.appointmentDate !== "string" || !isValidDate(body.appointmentDate)) issues.push("appointmentDate must use YYYY-MM-DD");
+    if (typeof body.appointmentTime !== "string" || !/^\d{2}:\d{2}$/.test(body.appointmentTime)) issues.push("appointmentTime must use HH:mm");
+    if (issues.length) return fail(res, 400, "Invalid appointment", issues);
+
+    const appointment = await transactDatabase((database) => {
+      if (!doctorCanBook(database)) throw Object.assign(new Error("Doctor is currently unavailable for appointments."), { status: 409 });
+      const schedule = database.doctorSchedule;
+      if (!schedule || validateSchedule(schedule).length) throw Object.assign(new Error("Doctor schedule is not configured"), { status: 409 });
+      const date = body.appointmentDate as string;
+      const time = body.appointmentTime as string;
+      if (date < currentDate()) throw Object.assign(new Error("Past appointment dates are not allowed"), { status: 400 });
+      const allowedSlots = generateTimeSlots(schedule.timeFrom, schedule.timeTo, schedule.slotDuration);
+      if (!schedule.availableDays.includes(dayForDate(date)!) || !allowedSlots.includes(time))
+        throw Object.assign(new Error("Selected date or time is outside the doctor's schedule"), { status: 400 });
+      database.appointments ??= [];
+      if (database.appointments.some((item) => item.appointmentDate === date && item.appointmentTime === time && item.status !== "Cancelled"))
+        throw Object.assign(new Error("This appointment slot has already been booked. Please select another available time."), { status: 409, code: "SLOT_TAKEN" });
+      const created: Appointment = {
+        id: randomUUID(), patientName: String(body.patientName).trim(), age: Number(body.age),
+        gender: body.gender as Appointment["gender"], phone: String(body.phone).trim(),
+        email: String(body.email).trim(), bloodGroup: String(body.bloodGroup).trim(),
+        problem: String(body.problem).trim(), appointmentDate: date, appointmentTime: time,
+        status: "Booked", createdAt: new Date().toISOString(),
+      };
+      database.appointments.push(created);
+      return created;
+    });
+    return res.status(201).json(appointment);
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "status" in error) {
+      const problem = error as { status: number; message: string; code?: string };
+      return fail(res, problem.status, problem.message, problem.code === "SLOT_TAKEN" ? ["This appointment slot has already been booked. Please select another available time."] : undefined);
+    }
+    return next(error);
+  }
+});
+
+app.patch("/api/appointments/:id/status", async (req, res, next) => {
+  try {
+    const status = (req.body as Record<string, unknown>).status;
+    if (!appointmentStatuses.includes(status as AppointmentStatus)) return fail(res, 400, "status must be Booked, Completed, or Cancelled");
+    const updated = await mutate((database) => {
+      const appointment = (database.appointments ?? []).find((item) => item.id === req.params.id);
+      if (!appointment) return undefined;
+      appointment.status = status as AppointmentStatus;
+      return appointment;
+    });
+    return updated ? res.json(updated) : fail(res, 404, "Appointment not found");
+  } catch (error) { next(error); }
 });
 
 app.use((_req, res) => fail(res, 404, "Route not found"));

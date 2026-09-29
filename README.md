@@ -22,7 +22,7 @@ FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
 
 Set `FIREBASE_SERVICE_ACCOUNT_JSON` to the complete one-line JSON from the service-account key file. Alternatively, omit it when running on Google Cloud with Application Default Credentials configured; `FIREBASE_PROJECT_ID` may still be needed in that environment. The API creates an empty `hospital/state` document on first use. Existing documents are left intact.
 
-The API currently stores both arrays in that single Firestore document to preserve its existing read/modify/write behavior. For multiple API instances receiving simultaneous writes, move to per-record documents and Firestore transactions before scaling out.
+The API stores patients, doctors, the single doctor's schedule, and appointments in the existing `hospital/state` Firestore document. Appointment booking uses a Firestore transaction to reject duplicate active date/time slots, including requests racing across API instances. Cancelled appointments release their slot.
 
 The API listens on `http://localhost:4000` by default. Set `PORT` to change the port. Patient and doctor records are stored in Firestore.
 
@@ -36,7 +36,15 @@ Interactive Swagger documentation is available at `http://localhost:4000/api-doc
 - `POST /api/patients`, `PUT /api/patients/:id`, `DELETE /api/patients/:id`
 - `GET /api/doctors`, `GET /api/doctors/:id`
 - `POST /api/doctors`, `PUT /api/doctors/:id`, `DELETE /api/doctors/:id`
+- `GET /api/doctor-schedule`, `PUT /api/doctor-schedule`
+- `GET /api/appointments/available-dates?from=YYYY-MM-DD`
+- `GET /api/appointments/slots?date=YYYY-MM-DD`
+- `GET /api/appointments` (optional `q` and `status` filters)
+- `POST /api/appointments`
+- `PATCH /api/appointments/:id/status`
 
 List endpoints return arrays. Optional query parameters: patients accept `q` and `status`; doctors accept `q` and `availability`. Create and update bodies match the frontend `PatientInput` and `DoctorInput` types. Validation errors return HTTP 400 with `{ "error": "...", "details": [...] }`.
 
 The API is ready for the frontend service layer to call; the current frontend still uses its in-memory mock service functions.
+
+Schedule times and appointment times use 24-hour `HH:mm` strings. Schedule writes accept `availableDays` (weekday names), `timeFrom`, `timeTo`, and `slotDuration` (15, 30, 45, or 60). Appointment requests contain patient details, `appointmentDate` (`YYYY-MM-DD`) and `appointmentTime` (`HH:mm`); the server creates the ID, `Booked` status, and timestamp. `/slots` returns entries like `{ "time": "09:00", "booked": false }`. Booking rejects unavailable doctors, past dates, dates/times outside the configured schedule, and already-booked slots with HTTP 409 for conflicts.

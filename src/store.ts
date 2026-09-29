@@ -5,11 +5,13 @@ import {
   initializeApp,
 } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
-import type { Doctor, Patient } from "./types.js";
+import type { Appointment, Doctor, DoctorSchedule, Patient } from "./types.js";
 
 export interface Database {
   patients: Patient[];
   doctors: Doctor[];
+  doctorSchedule?: DoctorSchedule | null;
+  appointments?: Appointment[];
 }
 
 function getDatabaseDocument() {
@@ -47,4 +49,21 @@ export async function readDatabase(): Promise<Database> {
 
 export async function writeDatabase(database: Database): Promise<void> {
   await getDatabaseDocument().set(database);
+}
+
+/** Run a read/modify/write operation with Firestore's cross-instance transaction lock. */
+export async function transactDatabase<T>(
+  operation: (database: Database) => T,
+): Promise<T> {
+  const document = getDatabaseDocument();
+  return getFirestore().runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(document);
+    const database = snapshot.exists
+      ? (snapshot.data() as Database)
+      : { patients: [], doctors: [] };
+    database.appointments ??= [];
+    const result = operation(database);
+    transaction.set(document, database);
+    return result;
+  });
 }

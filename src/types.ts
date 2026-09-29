@@ -1,6 +1,37 @@
 export type Gender = 'Male' | 'Female' | 'Other';
 export type PatientStatus = 'Admitted' | 'Discharged';
 export type Availability = 'Available' | 'Unavailable';
+export type AppointmentStatus = 'Booked' | 'Completed' | 'Cancelled';
+export type DayOfWeek =
+  | 'Monday'
+  | 'Tuesday'
+  | 'Wednesday'
+  | 'Thursday'
+  | 'Friday'
+  | 'Saturday'
+  | 'Sunday';
+
+export interface DoctorSchedule {
+  availableDays: DayOfWeek[];
+  timeFrom: string;
+  timeTo: string;
+  slotDuration: 15 | 30 | 45 | 60;
+}
+
+export interface Appointment {
+  id: string;
+  patientName: string;
+  age: number;
+  gender: Gender;
+  phone: string;
+  email: string;
+  bloodGroup: string;
+  problem: string;
+  appointmentDate: string;
+  appointmentTime: string;
+  status: AppointmentStatus;
+  createdAt: string;
+}
 
 export interface Patient {
   id: number;
