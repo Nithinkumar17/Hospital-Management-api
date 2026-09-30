@@ -18,6 +18,11 @@ Create a `.env` file in this directory (it is ignored by Git):
 ```env
 FIREBASE_PROJECT_ID=your-firebase-project-id
 FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+AUTH_TOKEN_SECRET=replace-with-a-long-random-secret
+HOSPITAL_STAFF_EMAIL=staff@example.com
+HOSPITAL_STAFF_PASSWORD=replace-with-a-strong-password
+DOCTOR_LOGIN_EMAIL=doctor@example.com
+DOCTOR_LOGIN_PASSWORD=replace-with-a-strong-password
 ```
 
 Set `FIREBASE_SERVICE_ACCOUNT_JSON` to the complete one-line JSON from the service-account key file. Alternatively, omit it when running on Google Cloud with Application Default Credentials configured; `FIREBASE_PROJECT_ID` may still be needed in that environment. The API creates an empty `hospital/state` document on first use. Existing documents are left intact.
@@ -26,10 +31,15 @@ The API stores patients, doctors, the single doctor's schedule, and appointments
 
 The API listens on `http://localhost:4000` by default. Set `PORT` to change the port. Patient and doctor records are stored in Firestore.
 
+Set the login values above before starting the API. The frontend offers Hospital staff and Doctor sign-in. Sessions expire after eight hours. Hospital staff can manage patient records, doctors, and appointments; doctors can view patient records. Doctors can update the schedule and availability, while staff can view the schedule read-only. The public dashboard returns aggregate counts only, and patient booking endpoints expose bookable dates and slots without the schedule-management endpoint. Do not commit real credentials or the token secret.
+
+Patient record and hospital management routes require a staff bearer token. Doctor schedule read/write and availability changes require a doctor bearer token. These permissions are enforced by the API as well as the frontend.
+
 Interactive Swagger documentation is available at `http://localhost:4000/api-docs`; the raw OpenAPI document is at `http://localhost:4000/api/openapi.json`.
 
 ## Endpoints
 
+- `POST /api/auth/login` (returns an eight-hour bearer token)
 - `GET /api/health`
 - `GET /api/dashboard`
 - `GET /api/patients`, `GET /api/patients/:id`

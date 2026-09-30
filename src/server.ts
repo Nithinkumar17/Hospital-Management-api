@@ -8,6 +8,7 @@ import express, {
 } from "express";
 import swaggerUi from "swagger-ui-express";
 import { openapiDocument } from "./openapi.js";
+import { authenticate, createToken, requireRole, type Role } from "./auth.js";
 import {
   checkDatabaseConnection,
   readDatabase,
@@ -55,6 +56,16 @@ app.use(
   swaggerUi.setup(openapiDocument, { explorer: true }),
 );
 app.get("/api/openapi.json", (_req, res) => res.json(openapiDocument));
+
+app.post("/api/auth/login", (req, res) => {
+  const body = req.body as Record<string, unknown>;
+  if ((body.role !== "staff" && body.role !== "doctor") || typeof body.email !== "string" || typeof body.password !== "string")
+    return fail(res, 400, "Choose a role and enter your email and password.");
+  const role = body.role as Role;
+  const user = authenticate(body.email, body.password, role);
+  if (!user) return fail(res, 401, "Invalid login details, or this account is not configured.");
+  return res.json({ token: createToken(user), user });
+});
 
 let writeQueue: Promise<void> = Promise.resolve();
 async function mutate<T>(
@@ -196,7 +207,7 @@ app.get("/api/dashboard", async (_req, res, next) => {
   }
 });
 
-app.get("/api/patients", async (req, res, next) => {
+app.get("/api/patients", requireRole("staff", "doctor"), async (req, res, next) => {
   try {
     const { patients } = await readDatabase();
     const status = req.query.status;
@@ -215,9 +226,9 @@ app.get("/api/patients", async (req, res, next) => {
   }
 });
 
-app.get("/api/patients/:id", async (req, res, next) => {
+app.get("/api/patients/:id", requireRole("staff", "doctor"), async (req, res, next) => {
   try {
-    const id = numericId(req.params.id);
+    const id = numericId(String(req.params.id));
     if (!id) return fail(res, 400, "Patient id must be a positive integer");
     const patient = (await readDatabase()).patients.find(
       (row) => row.id === id,
@@ -228,7 +239,7 @@ app.get("/api/patients/:id", async (req, res, next) => {
   }
 });
 
-app.post("/api/patients", async (req, res, next) => {
+app.post("/api/patients", requireRole("staff"), async (req, res, next) => {
   try {
     const body = req.body as Record<string, unknown>;
     const issues = validatePatient(body);
@@ -247,9 +258,9 @@ app.post("/api/patients", async (req, res, next) => {
   }
 });
 
-app.put("/api/patients/:id", async (req, res, next) => {
+app.put("/api/patients/:id", requireRole("staff"), async (req, res, next) => {
   try {
-    const id = numericId(req.params.id);
+    const id = numericId(String(req.params.id));
     if (!id) return fail(res, 400, "Patient id must be a positive integer");
     const body = req.body as Record<string, unknown>;
     const issues = validatePatient(body);
@@ -266,9 +277,9 @@ app.put("/api/patients/:id", async (req, res, next) => {
   }
 });
 
-app.delete("/api/patients/:id", async (req, res, next) => {
+app.delete("/api/patients/:id", requireRole("staff"), async (req, res, next) => {
   try {
-    const id = numericId(req.params.id);
+    const id = numericId(String(req.params.id));
     if (!id) return fail(res, 400, "Patient id must be a positive integer");
     const deleted = await mutate((database) => {
       const index = database.patients.findIndex((row) => row.id === id);
@@ -307,7 +318,7 @@ app.get("/api/doctors", async (req, res, next) => {
 
 app.get("/api/doctors/:id", async (req, res, next) => {
   try {
-    const id = numericId(req.params.id);
+    const id = numericId(String(req.params.id));
     if (!id) return fail(res, 400, "Doctor id must be a positive integer");
     const doctor = (await readDatabase()).doctors.find((row) => row.id === id);
     return doctor ? res.json(doctor) : fail(res, 404, "Doctor not found");
@@ -316,7 +327,7 @@ app.get("/api/doctors/:id", async (req, res, next) => {
   }
 });
 
-app.post("/api/doctors", async (req, res, next) => {
+app.post("/api/doctors", requireRole("staff"), async (req, res, next) => {
   try {
     const body = req.body as Record<string, unknown>;
     const issues = validateDoctor(body);
@@ -335,9 +346,9 @@ app.post("/api/doctors", async (req, res, next) => {
   }
 });
 
-app.put("/api/doctors/:id", async (req, res, next) => {
+app.put("/api/doctors/:id", requireRole("staff"), async (req, res, next) => {
   try {
-    const id = numericId(req.params.id);
+    const id = numericId(String(req.params.id));
     if (!id) return fail(res, 400, "Doctor id must be a positive integer");
     const body = req.body as Record<string, unknown>;
     const issues = validateDoctor(body);
@@ -354,9 +365,9 @@ app.put("/api/doctors/:id", async (req, res, next) => {
   }
 });
 
-app.delete("/api/doctors/:id", async (req, res, next) => {
+app.delete("/api/doctors/:id", requireRole("staff"), async (req, res, next) => {
   try {
-    const id = numericId(req.params.id);
+    const id = numericId(String(req.params.id));
     if (!id) return fail(res, 400, "Doctor id must be a positive integer");
     const deleted = await mutate((database) => {
       const index = database.doctors.findIndex((row) => row.id === id);
@@ -384,20 +395,34 @@ function doctorCanBook(database: Database): boolean {
   return database.doctors.length > 0 && database.doctors[0].availability === "Available";
 }
 
-app.get("/api/doctor-schedule", async (_req, res, next) => {
+app.get("/api/doctor-schedule", requireRole("doctor", "staff"), async (_req, res, next) => {
   try {
     const database = await readDatabase();
     res.json(database.doctorSchedule ?? emptySchedule);
   } catch (error) { next(error); }
 });
 
-app.put("/api/doctor-schedule", async (req, res, next) => {
+app.put("/api/doctor-schedule", requireRole("doctor"), async (req, res, next) => {
   try {
     const issues = validateSchedule(req.body);
     if (issues.length) return fail(res, 400, "Invalid doctor schedule", issues);
     const schedule = req.body as DoctorSchedule;
     await mutate((database) => { database.doctorSchedule = schedule; });
     return res.json({ message: "Schedule updated successfully", schedule });
+  } catch (error) { next(error); }
+});
+
+app.put("/api/doctor-availability", requireRole("doctor"), async (req, res, next) => {
+  try {
+    const available = (req.body as Record<string, unknown>).available;
+    if (typeof available !== "boolean") return fail(res, 400, "available must be true or false");
+    const doctor = await mutate((database) => {
+      const current = database.doctors[0];
+      if (!current) return undefined;
+      current.availability = available ? "Available" : "Unavailable";
+      return current;
+    });
+    return doctor ? res.json(doctor) : fail(res, 404, "Doctor record not found");
   } catch (error) { next(error); }
 });
 
@@ -430,7 +455,7 @@ app.get("/api/appointments/slots", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.get("/api/appointments", async (req, res, next) => {
+app.get("/api/appointments", requireRole("staff"), async (req, res, next) => {
   try {
     const database = await readDatabase();
     const status = req.query.status;
@@ -490,7 +515,7 @@ app.post("/api/appointments", async (req, res, next) => {
   }
 });
 
-app.patch("/api/appointments/:id/status", async (req, res, next) => {
+app.patch("/api/appointments/:id/status", requireRole("staff"), async (req, res, next) => {
   try {
     const status = (req.body as Record<string, unknown>).status;
     if (!appointmentStatuses.includes(status as AppointmentStatus)) return fail(res, 400, "status must be Booked, Completed, or Cancelled");
